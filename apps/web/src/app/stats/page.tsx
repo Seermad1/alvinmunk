@@ -43,9 +43,6 @@ export default function StatsPage() {
   const [stale, setStale] = useState<Record<NetKey, boolean>>({ testnet: false, mainnet: false });
   const [loading, setLoading] = useState(true);
 
-  // Match the server-side memo TTL so we don't hammer the route faster than it refreshes.
-  const POLL_MS = 30000;
-
   useEffect(() => {
     let alive = true;
     const load = () => {
@@ -69,47 +66,11 @@ export default function StatsPage() {
         });
     };
     setLoading(!data[tab]);
-    // Skip the initial fetch if the tab is hidden; the visibility handler below will
-    // trigger a load as soon as it becomes visible.
-    if (typeof document !== 'undefined' && document.hidden) return;
     load();
-    const t = setInterval(load, 10000); // live: refresh every 10s
+    const t = setInterval(load, 30_000); // /api/stats reuses a scan for 30 s, so poll no faster
     return () => {
       alive = false;
       clearInterval(t);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab]);
-
-  // Pause polling while the tab is hidden; resume (with an immediate refresh) on return.
-  useEffect(() => {
-    let alive = true;
-    const load = () => {
-      fetch(`/api/stats?network=${tab}`, { cache: 'no-store' })
-        .then((r) => {
-          if (!r.ok) throw new Error(`stats ${r.status}`);
-          return r.json() as Promise<Stats>;
-        })
-        .then((d) => {
-          if (alive) {
-            setData((prev) => ({ ...prev, [tab]: d }));
-            setStale((prev) => ({ ...prev, [tab]: false }));
-            setLoading(false);
-          }
-        })
-        .catch(() => {
-          if (!alive) return;
-          setStale((prev) => ({ ...prev, [tab]: true }));
-          setLoading(false);
-        });
-    };
-    const onVisibility = () => {
-      if (!document.hidden) load();
-    };
-    document.addEventListener('visibilitychange', onVisibility);
-    return () => {
-      alive = false;
-      document.removeEventListener('visibilitychange', onVisibility);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab]);

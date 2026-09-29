@@ -21,28 +21,29 @@ import { withRoute } from '@/lib/api-route';
  *
  * The vouch claim funnel (`funnel`) is read from the reputation contract's storage instead
  * (lib/vouch-funnel.ts), so it holds beyond the event window. It reads every half-card, so
- * it is cached per network for a few minutes; the wallet counter stays live.
+ * it is cached per network for a few minutes.
  *
- * The whole response is memoized at module scope for a short TTL (see STATS_TTL_MS)
- * with in-flight de-duplication, so concurrent polls from many tabs share one scan. The
- * response is also marked cacheable by the CDN.
+ * The whole response is memoized per network for STATS_TTL_MS, and concurrent requests share
+ * the scan in flight, so polling from many tabs costs one scan (1 + up to MAX_PAGES RPC calls)
+ * per window instead of one per request. The response is also cacheable by the CDN for the
+ * same window. The count only changes when someone onboards, so 30 s of staleness is harmless.
+ * The durable indexer (#109) would replace the scan entirely.
  */
 export const dynamic = 'force-dynamic';
+export const revalidate = 0;
 
 // Live scan: a short, dense window so the serverless call stays fast. The roster carries
 // history; this only needs to see the last day or so of fresh onboarding.
 const LIVE_WINDOW = 17_280; // ~1 day of ledgers
 const MAX_PAGES = 25;
 
-// How long a memoized stats response is reused. Matches the CDN `s-s-maxage` below and the
-// client poll interval. The count only changes when someone onboards, so a few seconds
-// of staleness is irrelevant and the ROI is not.
+// How long a scan is reused, here and at the CDN (`s-maxage` below must stay in step).
 const STATS_TTL_MS = 30_000;
-const CACHE_CONTROL = 'public, s-maxage=30, stale-while-revalidate=120';
+const CACHE_CONTROL = `public, s-maxage=${STATS_TTL_MS / 1000}, stale-while-revalidate=120`;
 
 type NetKey = 'testnet' | 'mainnet';
 
-const NETWORKS: Record;
+const NETWORKS: Record<
   NetKey,
   { rpc: string; rep?: string; registry?: string; exclude?: (string | undefined)[] }
 > = {
@@ -71,7 +72,7 @@ const NETWORKS: Record;
       process.env.MAINNET_REWARDS_CONTRACT_ID,
       process.env.MAINNET_QUEST_REGISTRY_CONTRACT_ID,
       process.env.MAINNET_GATE_CONTRACT_ID,
-      process.env.MAINNET_USDK_SAC_ID,
+      process.env.MAINNET_USDC_SAC_ID,
     ],
   },
 };
@@ -168,20 +169,26 @@ async function statsFor(net: NetKey) {
   };
 }
 
-// Memoize the whole stats response per network for STATS_TTL_MS, with in-flight
-// de-duplication so concurrent polls from many tabs share a single RPC scan.
 type StatsResult = Awaited<ReturnType<typeof statsFor>>;
-const statsCache = new Map<NetKey, { at: number; result: Promise<StatsResult> }>();
 
-function statsCached(net: NetKey): Promise<StatsResult> {
+const statsCache = new Map<NetKey, { expires: number; result: Promise<StatsResult> }>();
+
+/** The network's stats, shared by concurrent requests and reused for STATS_TTL_MS after the
+ *  scan finishes (a scan in flight never expires, however slow, so it is never run twice). A
+ *  scan that throws is not kept, so the next request retries it. */
+function cachedStatsFor(net: NetKey): Promise<StatsResult> {
   const hit = statsCache.get(net);
-  if (hit && Date.now() - hit.at < STATS_TTL_MS) return hit.result;
-  const entry = { at: Date.now(), result: statsFor(net) };
+  if (hit && Date.now() < hit.expires) return hit.result;
+  const entry = { expires: Infinity, result: statsFor(net) };
   statsCache.set(net, entry);
-  // Don't keep a rejected scan cached, so the next request retries.
-  void entry.result.catch(() => {
-    if (statsCache.get(net) === entry) statsCache.delete(net);
-  });
+  void entry.result.then(
+    () => {
+      entry.expires = Date.now() + STATS_TTL_MS;
+    },
+    () => {
+      if (statsCache.get(net) === entry) statsCache.delete(net);
+    },
+  );
   return entry.result;
 }
 
@@ -232,6 +239,6 @@ export const GET = withRoute('GET /api/stats', async (req: Request) => {
   if (net !== 'testnet' && net !== 'mainnet') {
     return NextResponse.json({ error: 'bad network' }, { status: 400 });
   }
-  const data = await statsCached(net);
+  const data = await cachedStatsFor(net);
   return NextResponse.json(data, { headers: { 'cache-control': CACHE_CONTROL } });
 });
