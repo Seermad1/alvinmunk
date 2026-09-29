@@ -1,10 +1,11 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { Users, Activity, ExternalLink } from 'lucide-react';
 import { shortAddr } from '@alvinmunk/shared';
 import { cn } from '@/lib/utils';
+import { usePoll } from '@/lib/use-poll';
 import type { VouchFunnel } from '@/lib/vouch-funnel';
 import { LoopHealth } from '@/components/LoopHealth';
 
@@ -43,38 +44,52 @@ export default function StatsPage() {
   // marker below reacts, so an outage never masquerades as a fresh zero.
   const [stale, setStale] = useState<Record<NetKey, boolean>>({ testnet: false, mainnet: false });
   const [loading, setLoading] = useState(true);
+  const hiddenRef = useRef(false);
 
   useEffect(() => {
-    let alive = true;
-    const load = () => {
-      fetch(`/api/stats?network=${tab}`, { cache: 'no-store' })
-        .then((r) => {
-          if (!r.ok) throw new Error(`stats ${r.status}`);
-          return r.json() as Promise<Stats>;
-        })
-        .then((d) => {
-          if (alive) {
-            setData((prev) => ({ ...prev, [tab]: d }));
-            setStale((prev) => ({ ...prev, [tab]: false }));
-            setLoading(false);
-          }
-        })
-        .catch(() => {
-          if (!alive) return;
-          // Keep the last good numbers on a failed poll; only the marker below reacts.
-          setStale((prev) => ({ ...prev, [tab]: true }));
-          setLoading(false);
-        });
-    };
     setLoading(!data[tab]);
-    load();
-    const t = setInterval(load, 30_000); // /api/stats reuses a scan for 30 s, so poll no faster
-    return () => {
-      alive = false;
-      clearInterval(t);
-    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab]);
+
+  // Track tab visibility so background tabs stop polling. The poll callback below bails
+  // early while hidden; the visibilitychange listener triggers an immediate refresh when
+  // the tab becomes visible again so the numbers are not stale on return.
+  useEffect(() => {
+    const onVisibility = () => {
+      hiddenRef.current = document.hidden;
+    };
+    onVisibility();
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => document.removeEventListener('visibilitychange', onVisibility);
+  }, []);
+
+  // Refresh every 10s while the tab is visible, never overlapping (lib/use-poll.ts). The tab is
+  // the poll's key: switching network restarts it with an immediate fetch, and the signal
+  // drops the previous network's late response.
+  usePoll(
+    async (signal) => {
+      try {
+        // Skip the fetch entirely while the tab is hidden — /api/stats is CDN-cached for 30 s
+        // (#444), so a background tab would only burn RPC budget for numbers nobody is reading.
+        if (hiddenRef.current) return;
+        const r = await fetch(`/api/stats?network=${tab}`, { cache: 'no-store' });
+        if (!r.ok) throw new Error(`stats ${r.status}`);
+        const d = (await r.json()) as Stats;
+        if (signal.aborted) return;
+        setData((prev) => ({ ...prev, [tab]: d }));
+        setStale((prev) => ({ ...prev, [tab]: false }));
+        setLoading(false);
+      } catch (err) {
+        if (signal.aborted) return;
+        // Keep the last good numbers on a failed poll; only the marker below reacts.
+        setStale((prev) => ({ ...prev, [tab]: true }));
+        setLoading(false);
+        throw err; // so the poll backs off
+      }
+    },
+    30_000, // matches the /api/stats CDN TTL (#444); hidden tabs skip polls entirely
+    tab,
+  );
 
   const s = data[tab];
   const users = s?.users;

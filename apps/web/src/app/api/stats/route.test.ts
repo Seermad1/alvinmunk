@@ -121,4 +121,16 @@ describe('GET /api/stats RPC URL', () => {
     expect(await res.json()).toMatchObject({ users: 1, latestLedger: 50_000 });
     expect(rpc.Server).toHaveBeenCalledWith(HTTP_RPC, { allowHttp: true });
   });
+
+  it('shares one RPC scan across requests within the TTL', async () => {
+    const GET = await loadRoute({ NEXT_PUBLIC_RPC_URL: HTTP_RPC });
+    const [a, b] = await Promise.all([GET(req()), GET(req())]);
+
+    expect(a.status).toBe(200);
+    expect(b.status).toBe(200);
+    expect(getLatestLedger).toHaveBeenCalledTimes(1);
+    expect(getEvents).toHaveBeenCalledTimes(1);
+    expect(a.headers.get('cache-control')).toMatch(/s-maxage=30/);
+    expect(a.headers.get('cache-control')).toMatch(/stale-while-revalidate=120/);
+  });
 });

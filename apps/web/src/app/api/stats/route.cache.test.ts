@@ -1,7 +1,7 @@
 // @vitest-environment node
 /**
  * GET /api/stats caching (#175): a scan is shared by concurrent requests and reused for 30 s,
- * and the response is cacheable by the CDN for the same window.
+ * and the response is cacheable by the CD for the same window.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Address, Keypair, rpc, xdr } from '@stellar/stellar-sdk';
